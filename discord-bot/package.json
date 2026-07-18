@@ -9,13 +9,14 @@
     "deploy": "node src/deploy-commands.js"
   },
   "dependencies": {
-    "discord.js": "^14.16.2",
-    "@discordjs/voice": "^0.17.0",
     "@discordjs/rest": "^2.4.3",
+    "@discordjs/voice": "^0.19.2",
+    "@distube/ytdl-core": "^4.16.12",
     "discord-api-types": "^0.37.119",
-    "opusscript": "^0.1.1",
+    "discord.js": "^14.16.2",
     "libsodium-wrappers": "^0.7.15",
-    "play-dl": "^1.9.7",
-    "openai": "^4.96.2"
+    "openai": "^4.96.2",
+    "opusscript": "^0.1.1",
+    "youtube-sr": "^4.3.12"
   }
 }
