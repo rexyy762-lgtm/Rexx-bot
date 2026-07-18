@@ -9,16 +9,16 @@ const path = require('path');
 const { token } = require('./config');
 
 // ── Create client with required intents ──────────────────────
-// NOTE: GuildMembers and MessageContent are *privileged* intents.
-// To enable welcome/goodbye events and XP tracking go to:
-//   Discord Developer Portal → Your Application → Bot → Privileged Gateway Intents
-// and toggle ON "Server Members Intent" and "Message Content Intent".
+// GuildMembers and MessageContent are privileged intents — they require manual
+// activation in the Discord Developer Portal (Bot → Privileged Gateway Intents).
+// They are intentionally omitted here so the bot can start without them.
+// Once you enable them in the portal, add them back to restore:
+//   • /welcome  /goodbye  (needs GuildMembers)
+//   • XP leveling         (needs MessageContent)
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,     // privileged — enable in Dev Portal
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,   // privileged — enable in Dev Portal
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessageReactions,
   ],
