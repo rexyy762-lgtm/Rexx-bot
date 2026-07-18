@@ -1,6 +1,7 @@
 // ── /pat ──────────────────────────────────────────────────────
 const { SlashCommandBuilder } = require('discord.js');
 const { createEmbed, errorEmbed } = require('../../utils/embeds');
+const { getGif } = require('../../utils/giphy');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -13,20 +14,20 @@ module.exports = {
     const author = interaction.user;
 
     try {
-      const res  = await fetch('https://nekos.best/api/v2/pat');
-      const data = await res.json();
+      const gifUrl = await getGif('anime head pat');
       await interaction.reply({
         embeds: [createEmbed({
           title: target.id === author.id
             ? `🥺 ${author.username} patted themselves.`
             : `🥺 ${author.username} patted ${target.username}!`,
           description: '*Good human! Very good human!*',
-          image: data.results[0].url,
+          image: gifUrl,
           color: 0xFFD700,
-          footer: { text: '✨ pat pat' },
+          footer: { text: 'Powered by GIPHY' },
         })],
       });
-    } catch {
+    } catch (err) {
+      console.error('[pat]', err.message);
       await interaction.reply({ embeds: [errorEmbed('Could not fetch a GIF right now.')], flags: 64 });
     }
   },

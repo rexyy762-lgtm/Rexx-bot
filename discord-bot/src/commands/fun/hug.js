@@ -1,6 +1,7 @@
 // ── /hug ──────────────────────────────────────────────────────
 const { SlashCommandBuilder } = require('discord.js');
 const { createEmbed, errorEmbed } = require('../../utils/embeds');
+const { getGif } = require('../../utils/giphy');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,20 +15,20 @@ module.exports = {
     const selfHug = target.id === author.id;
 
     try {
-      const res  = await fetch('https://nekos.best/api/v2/hug');
-      const data = await res.json();
+      const gifUrl = await getGif('anime hug');
       await interaction.reply({
         embeds: [createEmbed({
           title: selfHug
             ? `🤗 ${author.username} hugged themselves… aww.`
             : `🤗 ${author.username} hugged ${target.username}!`,
           description: selfHug ? '*Giving yourself some love. Respect.*' : '*Wholesome!*',
-          image: data.results[0].url,
+          image: gifUrl,
           color: 0xFF69B4,
-          footer: { text: '❤️ Spread love!' },
+          footer: { text: 'Powered by GIPHY' },
         })],
       });
-    } catch {
+    } catch (err) {
+      console.error('[hug]', err.message);
       await interaction.reply({ embeds: [errorEmbed('Could not fetch a GIF right now.')], flags: 64 });
     }
   },

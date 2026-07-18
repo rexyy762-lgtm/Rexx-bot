@@ -1,13 +1,14 @@
 // ── /dance ────────────────────────────────────────────────────
 const { SlashCommandBuilder } = require('discord.js');
 const { createEmbed, errorEmbed } = require('../../utils/embeds');
+const { getGif } = require('../../utils/giphy');
 
 const captions = [
-  "Get it! 🕺",
-  "Nobody can stop them now! 💃",
-  "The dance floor is THEIRS. 👑",
-  "No thoughts, only vibes. ✨",
-  "Someone call the ambulance… they're too fire. 🔥",
+  'Get it! 🕺',
+  'Nobody can stop them now! 💃',
+  'The dance floor is THEIRS. 👑',
+  'No thoughts, only vibes. ✨',
+  'Someone call the ambulance… they\'re too fire. 🔥',
 ];
 
 module.exports = {
@@ -17,19 +18,19 @@ module.exports = {
 
   async execute(interaction) {
     try {
-      const res  = await fetch('https://nekos.best/api/v2/dance');
-      const data = await res.json();
+      const gifUrl  = await getGif('anime dance');
       const caption = captions[Math.floor(Math.random() * captions.length)];
       await interaction.reply({
         embeds: [createEmbed({
           title: `💃 ${interaction.user.username} hits the dance floor!`,
           description: caption,
-          image: data.results[0].url,
+          image: gifUrl,
           color: 0x9B59B6,
-          footer: { text: '🎵 Party time!' },
+          footer: { text: 'Powered by GIPHY' },
         })],
       });
-    } catch {
+    } catch (err) {
+      console.error('[dance]', err.message);
       await interaction.reply({ embeds: [errorEmbed('Could not fetch a GIF right now.')], flags: 64 });
     }
   },

@@ -1,6 +1,7 @@
 // ── /slap ─────────────────────────────────────────────────────
 const { SlashCommandBuilder } = require('discord.js');
 const { createEmbed, errorEmbed } = require('../../utils/embeds');
+const { getGif } = require('../../utils/giphy');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -15,18 +16,18 @@ module.exports = {
       return interaction.reply({ embeds: [errorEmbed("You can't slap yourself… or can you? 🤔")], flags: 64 });
 
     try {
-      const res  = await fetch('https://nekos.best/api/v2/slap');
-      const data = await res.json();
+      const gifUrl = await getGif('anime slap');
       await interaction.reply({
         embeds: [createEmbed({
           title: `👋 ${author.username} slapped ${target.username}!`,
           description: `*${target.username} felt that one.*`,
-          image: data.results[0].url,
+          image: gifUrl,
           color: 0xE74C3C,
-          footer: { text: 'Ouch!' },
+          footer: { text: 'Powered by GIPHY' },
         })],
       });
-    } catch {
+    } catch (err) {
+      console.error('[slap]', err.message);
       await interaction.reply({ embeds: [errorEmbed('Could not fetch a GIF right now.')], flags: 64 });
     }
   },

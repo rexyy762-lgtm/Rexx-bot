@@ -1,13 +1,14 @@
 // ── /cry ──────────────────────────────────────────────────────
 const { SlashCommandBuilder } = require('discord.js');
 const { createEmbed, errorEmbed } = require('../../utils/embeds');
+const { getGif } = require('../../utils/giphy');
 
 const captions = [
-  "It's okay to cry. 💙",
-  "Let it all out… 😭",
-  "Somebody hold them. 🫂",
-  "The tears are real and valid. 💧",
-  "Plot twist: they're not okay. 😢",
+  'It\'s okay to cry. 💙',
+  'Let it all out… 😭',
+  'Somebody hold them. 🫂',
+  'The tears are real and valid. 💧',
+  'Plot twist: they\'re not okay. 😢',
 ];
 
 module.exports = {
@@ -17,19 +18,19 @@ module.exports = {
 
   async execute(interaction) {
     try {
-      const res  = await fetch('https://nekos.best/api/v2/cry');
-      const data = await res.json();
+      const gifUrl  = await getGif('anime crying');
       const caption = captions[Math.floor(Math.random() * captions.length)];
       await interaction.reply({
         embeds: [createEmbed({
           title: `😭 ${interaction.user.username} is crying!`,
           description: caption,
-          image: data.results[0].url,
+          image: gifUrl,
           color: 0x74B9FF,
-          footer: { text: '💧 There there...' },
+          footer: { text: 'Powered by GIPHY' },
         })],
       });
-    } catch {
+    } catch (err) {
+      console.error('[cry]', err.message);
       await interaction.reply({ embeds: [errorEmbed('Could not fetch a GIF right now.')], flags: 64 });
     }
   },

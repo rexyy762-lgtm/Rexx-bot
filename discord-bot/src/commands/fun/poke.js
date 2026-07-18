@@ -1,6 +1,7 @@
 // ── /poke ─────────────────────────────────────────────────────
 const { SlashCommandBuilder } = require('discord.js');
 const { createEmbed, errorEmbed } = require('../../utils/embeds');
+const { getGif } = require('../../utils/giphy');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -13,18 +14,18 @@ module.exports = {
     const author = interaction.user;
 
     try {
-      const res  = await fetch('https://nekos.best/api/v2/poke');
-      const data = await res.json();
+      const gifUrl = await getGif('anime poke');
       await interaction.reply({
         embeds: [createEmbed({
           title: `👉 ${author.username} poked ${target.username}!`,
           description: `*Hey! ${target.username}! Wake up!*`,
-          image: data.results[0].url,
+          image: gifUrl,
           color: 0x1ABC9C,
-          footer: { text: '👈 poke' },
+          footer: { text: 'Powered by GIPHY' },
         })],
       });
-    } catch {
+    } catch (err) {
+      console.error('[poke]', err.message);
       await interaction.reply({ embeds: [errorEmbed('Could not fetch a GIF right now.')], flags: 64 });
     }
   },
