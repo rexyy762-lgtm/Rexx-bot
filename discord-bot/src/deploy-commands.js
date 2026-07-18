@@ -38,13 +38,19 @@ const rest = new REST({ version: '10' }).setToken(token);
   console.log(`⏳ Registering ${commands.length} slash command(s)…`);
 
   if (guildId) {
-    // Guild-scoped — takes effect immediately
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-    console.log(`✅ Registered ${commands.length} command(s) to guild ${guildId}`);
+    // Try guild-scoped first (instant), fall back to global if bot lacks access
+    try {
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+      console.log(`✅ Registered ${commands.length} command(s) to guild ${guildId}`);
+    } catch (guildErr) {
+      console.warn(`⚠️  Guild registration failed (${guildErr.code ?? guildErr.message}), falling back to global…`);
+      await rest.put(Routes.applicationCommands(clientId), { body: commands });
+      console.log(`✅ Registered ${commands.length} command(s) globally (may take a few minutes to appear)`);
+    }
   } else {
-    // Global — can take up to one hour to propagate
+    // Global — propagates within a few minutes for bots in < 100 servers
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log(`✅ Registered ${commands.length} command(s) globally (up to 1 h to propagate)`);
+    console.log(`✅ Registered ${commands.length} command(s) globally (may take a few minutes to appear)`);
   }
 })().catch(err => {
   console.error('❌ Failed to register commands:', err);
