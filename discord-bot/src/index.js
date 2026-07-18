@@ -9,16 +9,12 @@ const path = require('path');
 const { token } = require('./config');
 
 // ── Create client with required intents ──────────────────────
-// GuildMembers and MessageContent are privileged intents — they require manual
-// activation in the Discord Developer Portal (Bot → Privileged Gateway Intents).
-// They are intentionally omitted here so the bot can start without them.
-// Once you enable them in the portal, add them back to restore:
-//   • /welcome  /goodbye  (needs GuildMembers)
-//   • XP leveling         (needs MessageContent)
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,        // privileged — Server Members Intent
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,      // privileged — Message Content Intent
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessageReactions,
   ],
