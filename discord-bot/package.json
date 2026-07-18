@@ -1,0 +1,21 @@
+{
+  "name": "@workspace/discord-bot",
+  "version": "1.0.0",
+  "description": "Multipurpose Discord bot with slash commands",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "deploy": "node src/deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.2",
+    "@discordjs/voice": "^0.17.0",
+    "@discordjs/rest": "^2.4.3",
+    "discord-api-types": "^0.37.119",
+    "opusscript": "^0.1.1",
+    "libsodium-wrappers": "^0.7.15",
+    "play-dl": "^1.9.7",
+    "openai": "^4.96.2"
+  }
+}
