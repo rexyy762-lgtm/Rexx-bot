@@ -1,21 +1,34 @@
 // ============================================================
 // utils/musicPlayer.js — Per-guild music queue & voice management
 //
-// Two-stage audio pipeline (solves YouTube bot-detection):
+// Audio pipeline
+// ──────────────
+//   Stage 1  yt-dlp --get-url
+//     Resolves the signed googlevideo.com CDN URL.  Uses the
+//     tv_embedded / mediaconnect ANDROID_VR client which works
+//     without PO tokens on GCP IPs — as long as the video has
+//     not been rate-limited for this IP.
 //
-//   Stage 1 – yt-dlp --get-url
-//     yt-dlp resolves the signed googlevideo.com CDN URL using the
-//     tv_embedded / mediaconnect client.  It only makes a lightweight
-//     API call — it never downloads audio bytes, so YouTube's download
-//     bot-detector never fires.
+//   Stage 2  FFmpeg HTTP → raw PCM
+//     FFmpeg fetches the CDN URL (normal HTTP, not yt-dlp's
+//     downloader) and pipes s16le/48 kHz/stereo PCM to
+//     @discordjs/voice → Opus encoder → Discord.
 //
-//   Stage 2 – FFmpeg HTTP → PCM pipe
-//     FFmpeg fetches the CDN URL directly (looks like a normal browser
-//     request), transcodes to raw s16le PCM at 48 kHz / stereo, and
-//     pipes the bytes to @discordjs/voice, which Opus-encodes them for
-//     Discord.  FFmpeg's reconnect flags handle transient CDN errors.
+// YouTube rate-limiting
+// ─────────────────────
+//   YouTube blocks specific video IDs per-IP after repeated
+//   failed requests.  The permanent fix is authenticated cookies:
 //
-// Tested July 2026 on Replit GCP IPs.
+//   1. Sign into YouTube in Chrome/Firefox
+//   2. Install the "Get cookies.txt LOCALLY" browser extension
+//      https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc
+//   3. Click the extension on youtube.com → Export → "For current site"
+//   4. Copy the entire file contents
+//   5. In Replit → Secrets → add  YOUTUBE_COOKIES  with that value
+//   6. Restart the Discord Bot workflow
+//
+//   With cookies loaded the bot uses authenticated sessions and
+//   YouTube never rate-limits it.
 // ============================================================
 'use strict';
 
@@ -28,52 +41,61 @@ const {
   entersState,
   StreamType,
 } = require('@discordjs/voice');
-const { spawn } = require('child_process');
+const { spawn }  = require('child_process');
+const { writeFileSync, existsSync } = require('fs');
 const path = require('path');
 
-// ── Paths ─────────────────────────────────────────────────────
-const YT_DLP = path.join(__dirname, '../../bin/yt-dlp');
-const FFMPEG  = process.env.FFMPEG_PATH ?? 'ffmpeg';
+// ── Paths ──────────────────────────────────────────────────────
+const YT_DLP      = path.join(__dirname, '../../bin/yt-dlp');
+const FFMPEG      = process.env.FFMPEG_PATH ?? 'ffmpeg';
+const COOKIE_FILE = '/tmp/yt-cookies.txt';
 
-// Player clients that work without PO tokens or cookies on GCP IPs
-const YT_CLIENT_ARGS = [
-  '--extractor-args', 'youtube:player_client=tv_embedded,mediaconnect',
-];
+// ── Cookie setup (runs once at module load) ─────────────────────
+let cookiesReady = false;
 
-/** @type {Map<string, GuildQueue>} */
-const queues = new Map();
-
-// ── GuildQueue ────────────────────────────────────────────────
-
-class GuildQueue {
-  constructor() {
-    this.songs        = [];    // Array<{ title, url, requestedBy }>
-    this.player       = createAudioPlayer();
-    this.connection   = null;
-    this.volume       = 1.0;
-    this.current      = null;
-    this.textChannel  = null;
-    this._proc        = null;  // active FFmpeg child process
+(function setupCookies() {
+  const raw = process.env.YOUTUBE_COOKIES;
+  if (!raw || !raw.trim()) return;
+  try {
+    // Ensure Netscape header so yt-dlp parses the file correctly
+    const content = raw.trim().startsWith('#')
+      ? raw.trim()
+      : `# Netscape HTTP Cookie File\n${raw.trim()}`;
+    writeFileSync(COOKIE_FILE, content + '\n', 'utf8');
+    cookiesReady = true;
+    console.log('[Music] ✅ YouTube cookies loaded — authenticated mode active');
+  } catch (err) {
+    console.warn('[Music] ⚠️  Could not write cookie file:', err.message);
   }
+})();
+
+// ── yt-dlp helpers ─────────────────────────────────────────────
+
+/** Returns the yt-dlp args that are common to every invocation. */
+function baseYtArgs() {
+  const args = [
+    '--no-playlist',
+    '--extractor-args', 'youtube:player_client=tv_embedded,mediaconnect',
+    '--no-warnings',
+    '--no-cache-dir',
+  ];
+  if (cookiesReady) args.push('--cookies', COOKIE_FILE);
+  return args;
 }
 
-// ── Stage 1: URL resolution ───────────────────────────────────
-
 /**
- * Asks yt-dlp to resolve the signed googlevideo CDN URL for a video.
- * Only makes lightweight YouTube API calls — never downloads audio bytes.
+ * Stage 1 — ask yt-dlp for the signed CDN URL.
+ * Only makes a lightweight YouTube API call; no audio bytes are downloaded.
  *
- * @param {string} videoUrl  YouTube watch / shorts URL
- * @returns {Promise<string>} Direct CDN URL ready for FFmpeg
+ * @param {string} videoUrl
+ * @returns {Promise<string>}
  */
 function resolveCdnUrl(videoUrl) {
   return new Promise((resolve, reject) => {
     const proc = spawn(YT_DLP, [
-      '--no-playlist',
-      ...YT_CLIENT_ARGS,
+      ...baseYtArgs(),
       '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-      '--no-warnings',
-      '--get-url',          // print CDN URL(s), do NOT download
+      '--get-url',
       videoUrl,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -88,13 +110,17 @@ function resolveCdnUrl(videoUrl) {
     });
 
     proc.on('close', (code) => {
-      // --get-url may return multiple lines (one per format); take the first
       const url = stdout.trim().split('\n')[0]?.trim();
       if (code !== 0 || !url) {
-        return reject(new Error(
-          stderr.trim().replace(/\n/g, ' ').slice(0, 300) ||
-          `yt-dlp exited with code ${code}`
-        ));
+        // Build a human-readable error that shows up in Discord
+        const raw = stderr.trim().replace(/\n/g, ' ').slice(0, 400);
+        const isRateLimit = raw.includes('Sign in') || raw.includes('bot');
+        const msg = isRateLimit
+          ? `YouTube blocked this video from the server's IP (rate-limited). ` +
+            `Try a different song, or fix permanently by adding a YOUTUBE_COOKIES secret — ` +
+            `run \`/music setup\` in Discord for instructions.`
+          : raw || `yt-dlp exited with code ${code}`;
+        return reject(new Error(msg));
       }
       resolve(url);
     });
@@ -105,34 +131,28 @@ function resolveCdnUrl(videoUrl) {
   });
 }
 
-// ── Stage 2: FFmpeg stream ────────────────────────────────────
-
 /**
- * Spawns FFmpeg to download the signed CDN URL and transcode it to
- * raw signed-16-bit little-endian PCM at 48 kHz stereo (StreamType.Raw).
+ * Stage 2 — FFmpeg fetches the CDN URL and transcodes to
+ * raw s16le PCM at 48 kHz / stereo (StreamType.Raw).
  *
- * @param {string} cdnUrl  Signed googlevideo.com URL from Stage 1
- * @returns {{ proc: ChildProcess, stream: Readable }}
+ * @param {string} cdnUrl
+ * @returns {{ proc: import('child_process').ChildProcess, stream: NodeJS.ReadableStream }}
  */
 function spawnFfmpeg(cdnUrl) {
   const proc = spawn(FFMPEG, [
-    // HTTP reconnect — handles CDN hiccups without stopping playback
-    '-reconnect',            '1',
-    '-reconnect_streamed',   '1',
-    '-reconnect_delay_max',  '5',
-    // Input: the signed CDN URL
-    '-i', cdnUrl,
-    // Output: raw PCM that @discordjs/voice (StreamType.Raw) expects
-    '-vn',                    // strip video
-    '-f',    's16le',         // signed 16-bit little-endian
-    '-ar',   '48000',         // 48 kHz — Discord's native sample rate
-    '-ac',   '2',             // stereo
-    'pipe:1',                 // write to stdout
+    '-reconnect',           '1',
+    '-reconnect_streamed',  '1',
+    '-reconnect_delay_max', '5',
+    '-i',  cdnUrl,
+    '-vn',
+    '-f',  's16le',
+    '-ar', '48000',
+    '-ac', '2',
+    'pipe:1',
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   proc.stderr.on('data', (d) => {
     const msg = d.toString();
-    // FFmpeg sends progress to stderr; only surface real errors
     if (
       (msg.includes('Error') || msg.includes('Invalid')) &&
       !msg.includes('past duration') &&
@@ -142,21 +162,34 @@ function spawnFfmpeg(cdnUrl) {
     }
   });
 
-  proc.on('error', (err) => {
-    console.error('[FFmpeg] Spawn error:', err.message);
-  });
-
+  proc.on('error', (err) => console.error('[FFmpeg] spawn error:', err.message));
   return { proc, stream: proc.stdout };
 }
 
-// ── Internal: advance the queue ───────────────────────────────
+// ── GuildQueue ─────────────────────────────────────────────────
+
+/** @type {Map<string, GuildQueue>} */
+const queues = new Map();
+
+class GuildQueue {
+  constructor() {
+    this.songs       = [];   // Array<{ title, url, requestedBy }>
+    this.player      = createAudioPlayer();
+    this.connection  = null;
+    this.volume      = 1.0;
+    this.current     = null;
+    this.textChannel = null;
+    this._proc       = null; // active FFmpeg child process
+  }
+}
+
+// ── Internal: advance the queue ────────────────────────────────
 
 async function _playNext(guildId) {
   const q = queues.get(guildId);
   if (!q) return;
 
   if (q.songs.length === 0) {
-    // Leave voice after 30 s of silence
     setTimeout(() => destroyQueue(guildId), 30_000);
     return;
   }
@@ -164,44 +197,46 @@ async function _playNext(guildId) {
   q.current = q.songs.shift();
 
   try {
-    // Stage 1 — resolve the CDN URL (fast, ~0.5–1 s)
     const cdnUrl = await resolveCdnUrl(q.current.url);
-
-    // Stage 2 — stream via FFmpeg
     const { proc, stream } = spawnFfmpeg(cdnUrl);
     q._proc = proc;
 
-    // StreamType.Raw = s16le PCM @ 48000/2ch — @discordjs/voice Opus-encodes it
     const resource = createAudioResource(stream, {
       inputType:    StreamType.Raw,
       inlineVolume: true,
     });
     resource.volume?.setVolume(q.volume);
-
     q.player.play(resource);
 
-    // When the current track ends, advance
     q.player.once(AudioPlayerStatus.Idle, () => {
       try { proc.kill('SIGKILL'); } catch {}
       _playNext(guildId);
     });
 
     console.log(`[Music] ▶ Now playing: ${q.current.title}`);
-    q.textChannel
-      ?.send(`▶️ **Now playing:** ${q.current.title}`)
-      .catch(() => {});
+    q.textChannel?.send(`▶️ **Now playing:** ${q.current.title}`).catch(() => {});
 
   } catch (err) {
     console.error(`[Music] Failed to play "${q.current?.title}":`, err.message);
-    q.textChannel
-      ?.send(`⚠️ Could not play **${q.current?.title}** — skipping.\n\`${err.message.slice(0, 200)}\``)
-      .catch(() => {});
-    // Skip to the next song
+
+    const isRateLimit = err.message.includes('rate-limited') ||
+                        err.message.includes('Sign in') ||
+                        err.message.includes('bot');
+
+    const userMsg = isRateLimit
+      ? `⚠️ **${q.current?.title}** — skipped.\n` +
+        `> YouTube blocked this video from the bot's IP.\n` +
+        `> **Try a different song** — most songs work fine.\n` +
+        `> **Permanent fix:** add your YouTube cookies as a Replit secret.\n` +
+        `> See \`/music setup\` for step-by-step instructions.`
+      : `⚠️ Could not play **${q.current?.title}** — skipping.\n\`${err.message.slice(0, 200)}\``;
+
+    q.textChannel?.send(userMsg).catch(() => {});
     _playNext(guildId);
   }
 }
 
-// ── Public API ────────────────────────────────────────────────
+// ── Public API ──────────────────────────────────────────────────
 
 function getQueue(guildId) {
   if (!queues.has(guildId)) queues.set(guildId, new GuildQueue());
@@ -217,14 +252,6 @@ function destroyQueue(guildId) {
   queues.delete(guildId);
 }
 
-/**
- * Join voice and enqueue a song.  Starts playback immediately if idle.
- *
- * @param {string}                         guildId
- * @param {import('discord.js').VoiceChannel} voiceChannel
- * @param {import('discord.js').TextChannel}  textChannel
- * @param {{ title: string, url: string, requestedBy: string }} song
- */
 async function play(guildId, voiceChannel, textChannel, song) {
   const q = getQueue(guildId);
   q.textChannel = textChannel;
@@ -237,7 +264,6 @@ async function play(guildId, voiceChannel, textChannel, song) {
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     });
 
-    // Reconnect gracefully on unexpected disconnect
     q.connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
@@ -274,6 +300,7 @@ function setVolume(guildId, percent) {
   return true;
 }
 
+function hasCookies()    { return cookiesReady; }
 function getCurrent(guildId)   { return queues.get(guildId)?.current ?? null; }
 function getQueueList(guildId) { return queues.get(guildId)?.songs   ?? []; }
 function isPaused(guildId) {
@@ -281,13 +308,7 @@ function isPaused(guildId) {
 }
 
 module.exports = {
-  play,
-  skip,
-  pause,
-  resume,
-  setVolume,
-  getCurrent,
-  getQueueList,
-  isPaused,
-  destroyQueue,
+  play, skip, pause, resume, setVolume,
+  getCurrent, getQueueList, isPaused,
+  destroyQueue, hasCookies,
 };

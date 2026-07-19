@@ -1,60 +1,48 @@
 // ============================================================
-// commands/music/music.js — Music player slash command
-//
-// Search: youtube-sr    (no auth needed)
-// Meta:   yt-dlp --dump-json  with tv_embedded client
-// Stream: yt-dlp tv_embedded → piped through @discordjs/voice FFmpeg
+// commands/music/music.js — /music command
 // ============================================================
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
-const { spawn } = require('child_process');
-const path      = require('path');
-const YouTube   = require('youtube-sr').default;
+const { SlashCommandBuilder, EmbedBuilder, Colors } = require('discord.js');
+const { spawn }   = require('child_process');
+const path        = require('path');
+const YouTube     = require('youtube-sr').default;
 const musicPlayer = require('../../utils/musicPlayer');
 const { createEmbed, successEmbed, errorEmbed, infoEmbed } = require('../../utils/embeds');
 
 const YT_DLP = path.join(__dirname, '../../../bin/yt-dlp');
+const COOKIE_FILE = '/tmp/yt-cookies.txt';
 
-// Shared bypass flags — same as musicPlayer.js
-const YT_CLIENT_ARGS = [
-  '--extractor-args', 'youtube:player_client=tv_embedded,mediaconnect',
-];
+// ── Helpers ────────────────────────────────────────────────────
 
-// ── Helpers ───────────────────────────────────────────────────
-
-/** Returns true if the string looks like a YouTube URL. */
 function isYouTubeUrl(str) {
   return /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch|shorts)|youtu\.be)\/.+/.test(str);
 }
 
-/**
- * Fetch title + canonical URL via yt-dlp --dump-json.
- * Uses the tv_embedded client so it never hits bot-detection.
- */
-function getVideoInfo(url) {
+/** Resolve a YouTube URL → { title, url } using yt-dlp --dump-json */
+function getVideoInfo(videoUrl) {
   return new Promise((resolve, reject) => {
-    let json = '';
-    const proc = spawn(YT_DLP, [
+    const args = [
       '--no-playlist',
-      ...YT_CLIENT_ARGS,
+      '--extractor-args', 'youtube:player_client=tv_embedded,mediaconnect',
+      '--no-warnings', '--no-cache-dir',
       '--dump-json',
-      '--no-warnings',
-      url,
-    ]);
+    ];
+    const fs = require('fs');
+    if (fs.existsSync(COOKIE_FILE)) args.push('--cookies', COOKIE_FILE);
+    args.push(videoUrl);
 
+    const proc = spawn(YT_DLP, args);
+    let json = '', err = '';
     proc.stdout.on('data', (d) => { json += d.toString(); });
-    proc.stderr.on('data', (d) => {
-      const line = d.toString().trim();
-      if (line.includes('ERROR')) console.error('[yt-dlp/info]', line);
-    });
+    proc.stderr.on('data', (d) => { err  += d.toString(); });
     proc.on('close', (code) => {
       if (code !== 0 || !json.trim()) {
-        return reject(new Error('yt-dlp could not fetch video info (bot detection or invalid URL)'));
+        return reject(new Error(err.trim().slice(0, 200) || `yt-dlp exited ${code}`));
       }
       try {
         const data = JSON.parse(json.trim());
-        resolve({ title: data.title ?? url, url: data.webpage_url ?? url });
+        resolve({ title: data.title ?? videoUrl, url: data.webpage_url ?? videoUrl });
       } catch {
         reject(new Error('Failed to parse yt-dlp JSON output'));
       }
@@ -63,22 +51,56 @@ function getVideoInfo(url) {
   });
 }
 
-/**
- * Resolve a query (URL or search terms) → { title, url }.
- */
+/** Resolve search query or URL → { title, url } */
 async function resolve(query) {
-  if (isYouTubeUrl(query)) {
-    return getVideoInfo(query);
-  }
-  // Text search: youtube-sr finds the top match, then we verify via yt-dlp
+  if (isYouTubeUrl(query)) return getVideoInfo(query);
   const video = await YouTube.searchOne(query);
-  if (!video?.url) throw new Error(`No YouTube results found for: ${query}`);
-  // Return search result directly — title from youtube-sr is reliable enough
-  // and saves one round-trip for the user.
+  if (!video?.url) throw new Error(`No results found for: ${query}`);
   return { title: video.title ?? 'Unknown Title', url: video.url };
 }
 
-// ── Command definition ────────────────────────────────────────
+// ── Setup instructions embed ───────────────────────────────────
+
+function setupEmbed() {
+  return new EmbedBuilder()
+    .setColor(Colors.Yellow)
+    .setTitle('🍪 Fix YouTube Playback — Add Cookies')
+    .setDescription(
+      'YouTube rate-limits the bot\'s server IP for videos requested too many times. ' +
+      '**Authenticated cookies bypass this permanently.**\n\n' +
+      '**Step-by-step setup:**'
+    )
+    .addFields(
+      {
+        name: '1️⃣  Install the extension',
+        value: '[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) (Chrome) ' +
+               'or [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/) (Firefox)',
+      },
+      {
+        name: '2️⃣  Export your YouTube cookies',
+        value: 'Go to **youtube.com** while signed in → click the extension → **Export** → "For current site"',
+      },
+      {
+        name: '3️⃣  Add as a Replit Secret',
+        value: 'In your Replit workspace: **Secrets** tab → **New secret**\n' +
+               '• Key: `YOUTUBE_COOKIES`\n' +
+               '• Value: paste the entire cookies.txt content',
+      },
+      {
+        name: '4️⃣  Restart the bot workflow',
+        value: 'Restart the **Discord Bot** workflow in Replit. The bot will log\n`✅ YouTube cookies loaded — authenticated mode active`',
+      },
+      {
+        name: '✅  Current cookie status',
+        value: musicPlayer.hasCookies()
+          ? '`Cookies loaded` — authenticated mode active'
+          : '`No cookies` — running unauthenticated (some videos may fail)',
+      },
+    )
+    .setFooter({ text: 'Once set up, all YouTube videos will play without restrictions' });
+}
+
+// ── Command definition ─────────────────────────────────────────
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -88,8 +110,9 @@ module.exports = {
       s.setName('play')
         .setDescription('Play a song by YouTube URL or search query')
         .addStringOption((o) =>
-          o.setName('query').setDescription('YouTube URL or search terms').setRequired(true).setMaxLength(500)
-        ))
+          o.setName('query')
+            .setDescription('YouTube URL or search terms')
+            .setRequired(true).setMaxLength(500)))
     .addSubcommand((s) => s.setName('stop').setDescription('Stop playback and disconnect'))
     .addSubcommand((s) => s.setName('skip').setDescription('Skip the current song'))
     .addSubcommand((s) => s.setName('pause').setDescription('Pause playback'))
@@ -100,8 +123,9 @@ module.exports = {
       s.setName('volume')
         .setDescription('Set playback volume (1–100)')
         .addIntegerOption((o) =>
-          o.setName('percent').setDescription('Volume percentage').setRequired(true).setMinValue(1).setMaxValue(100)
-        )),
+          o.setName('percent').setDescription('Volume percentage')
+            .setRequired(true).setMinValue(1).setMaxValue(100)))
+    .addSubcommand((s) => s.setName('setup').setDescription('Show cookie setup instructions for fixing YouTube playback')),
 
   async execute(interaction) {
     const sub          = interaction.options.getSubcommand();
@@ -115,7 +139,12 @@ module.exports = {
       });
     }
 
-    // ── play ──────────────────────────────────────────────────
+    // ── setup ────────────────────────────────────────────────
+    if (sub === 'setup') {
+      return interaction.reply({ embeds: [setupEmbed()], flags: 64 });
+    }
+
+    // ── play ─────────────────────────────────────────────────
     if (sub === 'play') {
       await interaction.deferReply();
       const query = interaction.options.getString('query', true);
@@ -124,11 +153,9 @@ module.exports = {
         const { title, url } = await resolve(query);
         const songInfo = { title, url, requestedBy: interaction.user.tag };
 
-        // play() joins VC and begins streaming; may take a second or two
         await musicPlayer.play(guildId, voiceChannel, interaction.channel, songInfo);
 
         const current  = musicPlayer.getCurrent(guildId);
-        // If something else is already playing, this song was queued
         const isQueued = current !== null && current.url !== url;
         const queueLen = musicPlayer.getQueueList(guildId).length;
 
@@ -137,50 +164,60 @@ module.exports = {
             title:       isQueued ? '📥 Added to Queue' : '▶️ Now Playing',
             description: `**[${title}](${url})**`,
             fields: [
-              { name: '📢 Channel',      value: voiceChannel.name,              inline: true },
-              { name: '👤 Requested by', value: songInfo.requestedBy,           inline: true },
-              { name: '🎵 Position',     value: isQueued ? `#${queueLen}` : 'Now', inline: true },
+              { name: '📢 Channel',      value: voiceChannel.name,                    inline: true },
+              { name: '👤 Requested by', value: songInfo.requestedBy,                 inline: true },
+              { name: '🎵 Position',     value: isQueued ? `#${queueLen}` : 'Now',    inline: true },
+              ...(!musicPlayer.hasCookies()
+                ? [{ name: '⚠️ Note', value: 'If playback fails, run `/music setup` to fix it permanently.', inline: false }]
+                : []),
             ],
           })],
         });
       } catch (err) {
         console.error('[Music:play]', err.message);
         return interaction.editReply({
-          embeds: [errorEmbed(
-            `Could not play that track.\n\`${err.message.slice(0, 300)}\``
-          )],
+          embeds: [
+            new EmbedBuilder()
+              .setColor(Colors.Red)
+              .setTitle('❌ Could not queue track')
+              .setDescription(`\`${err.message.slice(0, 300)}\``)
+              .addFields({
+                name: '💡 Fix',
+                value: 'Run `/music setup` to add YouTube cookies and resolve playback issues.',
+              }),
+          ],
         });
       }
     }
 
-    // ── stop ──────────────────────────────────────────────────
+    // ── stop ─────────────────────────────────────────────────
     if (sub === 'stop') {
       musicPlayer.destroyQueue(guildId);
       return interaction.reply({ embeds: [successEmbed('Stopped playback and disconnected.', '⏹️ Stopped')] });
     }
 
-    // ── skip ──────────────────────────────────────────────────
+    // ── skip ─────────────────────────────────────────────────
     if (sub === 'skip') {
       if (!musicPlayer.skip(guildId))
         return interaction.reply({ embeds: [errorEmbed('Nothing is currently playing.')], flags: 64 });
       return interaction.reply({ embeds: [successEmbed('Skipped the current song.', '⏭️ Skipped')] });
     }
 
-    // ── pause ─────────────────────────────────────────────────
+    // ── pause ────────────────────────────────────────────────
     if (sub === 'pause') {
       if (!musicPlayer.pause(guildId))
         return interaction.reply({ embeds: [errorEmbed('Nothing is playing or already paused.')], flags: 64 });
       return interaction.reply({ embeds: [successEmbed('Playback paused.', '⏸️ Paused')] });
     }
 
-    // ── resume ────────────────────────────────────────────────
+    // ── resume ───────────────────────────────────────────────
     if (sub === 'resume') {
       if (!musicPlayer.resume(guildId))
         return interaction.reply({ embeds: [errorEmbed('Nothing is paused.')], flags: 64 });
       return interaction.reply({ embeds: [successEmbed('Playback resumed.', '▶️ Resumed')] });
     }
 
-    // ── queue ─────────────────────────────────────────────────
+    // ── queue ────────────────────────────────────────────────
     if (sub === 'queue') {
       const current = musicPlayer.getCurrent(guildId);
       const queue   = musicPlayer.getQueueList(guildId);
@@ -203,7 +240,7 @@ module.exports = {
       });
     }
 
-    // ── nowplaying ────────────────────────────────────────────
+    // ── nowplaying ───────────────────────────────────────────
     if (sub === 'nowplaying') {
       const current = musicPlayer.getCurrent(guildId);
       if (!current)
@@ -218,7 +255,7 @@ module.exports = {
       });
     }
 
-    // ── volume ────────────────────────────────────────────────
+    // ── volume ───────────────────────────────────────────────
     if (sub === 'volume') {
       const percent = interaction.options.getInteger('percent', true);
       if (!musicPlayer.setVolume(guildId, percent))
