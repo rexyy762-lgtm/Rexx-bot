@@ -1,10 +1,12 @@
 // ============================================================
-// events/messageCreate.js — Awards XP on every user message
+// events/messageCreate.js — Awards XP + runs AutoMod checks
 // ============================================================
+'use strict';
 
 const { addXP, xpForLevel } = require('../utils/database');
 const { colors, xpMin, xpMax, xpCooldown } = require('../config');
 const { EmbedBuilder } = require('discord.js');
+const { checkMessage } = require('../automod/index');
 
 /** Map<guildId-userId, lastMessageTimestamp> for XP cooldowns. */
 const cooldowns = new Map();
@@ -14,24 +16,26 @@ module.exports = {
 
   async execute(message) {
     // Ignore bots and DMs
-    // Note: message.content requires the MessageContent privileged intent.
-    // XP is awarded based on the message event alone — not on content length.
     if (message.author.bot) return;
-    if (!message.guild) return;
+    if (!message.guild)     return;
 
-    const key = `${message.guild.id}-${message.author.id}`;
-    const now = Date.now();
+    // ── AutoMod check (runs first, may delete the message) ──
+    await checkMessage(message);
+
+    // ── XP system ───────────────────────────────────────────
+    // Note: if the message was deleted by AutoMod it still awards XP
+    // (the message event already fired — this is intentional, the user
+    // did type something).
+    const key  = `${message.guild.id}-${message.author.id}`;
+    const now  = Date.now();
     const last = cooldowns.get(key) ?? 0;
 
-    // Respect the XP cooldown to prevent spam farming
     if (now - last < xpCooldown) return;
     cooldowns.set(key, now);
 
-    // Award a random amount of XP
     const amount = Math.floor(Math.random() * (xpMax - xpMin + 1)) + xpMin;
-    const { xp, level, leveledUp } = addXP(message.guild.id, message.author.id, amount);
+    const { level, leveledUp } = addXP(message.guild.id, message.author.id, amount);
 
-    // Announce level-up in the same channel
     if (leveledUp) {
       const nextXP = Math.floor(xpForLevel(level + 1));
       const embed = new EmbedBuilder()

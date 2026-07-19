@@ -1,17 +1,23 @@
 // ============================================================
-// events/guildMemberAdd.js — Welcome message when a member joins
+// events/guildMemberAdd.js — Welcome message + Anti-Raid check
 // ============================================================
+'use strict';
 
 const { EmbedBuilder } = require('discord.js');
 const { getGuildConfig } = require('../utils/database');
 const { colors } = require('../config');
+const { checkRaid } = require('../automod/index');
 
 module.exports = {
   name: 'guildMemberAdd',
 
   async execute(member) {
+    // ── Anti-Raid detection ──────────────────────────────────
+    await checkRaid(member);
+
+    // ── Welcome message ──────────────────────────────────────
     const config = getGuildConfig(member.guild.id);
-    if (!config.welcomeChannel) return; // no channel configured
+    if (!config.welcomeChannel) return;
 
     const channel = member.guild.channels.cache.get(config.welcomeChannel);
     if (!channel) return;
@@ -27,7 +33,7 @@ module.exports = {
       .setFooter({ text: member.guild.name, iconURL: member.guild.iconURL({ dynamic: true }) ?? undefined })
       .setTimestamp();
 
-    await channel.send({ embeds: [embed] }).catch(err =>
+    await channel.send({ embeds: [embed] }).catch((err) =>
       console.error('[guildMemberAdd] Could not send welcome message:', err.message)
     );
   },
