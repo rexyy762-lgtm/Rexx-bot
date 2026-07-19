@@ -1,8 +1,12 @@
 // ============================================================
 // utils/musicPlayer.js — Per-guild music queue & voice management
-// Uses yt-dlp (native binary) piped into @discordjs/voice via FFmpeg.
-// No Python, no broken decipher hacks — yt-dlp handles everything.
+//
+// YouTube bypass strategy (tested July 2026):
+//   --extractor-args "youtube:player_client=tv_embedded,mediaconnect"
+//   Both clients return signed audio/mp4 stream URLs without cookies or
+//   PO tokens.  (ios/mweb/web_creator all fail on Replit IPs.)
 // ============================================================
+'use strict';
 
 const {
   createAudioPlayer,
@@ -18,48 +22,129 @@ const path = require('path');
 
 // ── Paths ─────────────────────────────────────────────────────
 const YT_DLP = path.join(__dirname, '../../bin/yt-dlp');
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFMPEG  = process.env.FFMPEG_PATH || 'ffmpeg';
+
+// Shared yt-dlp flags that bypass YouTube bot detection on server IPs
+const YT_CLIENT_ARGS = [
+  '--extractor-args', 'youtube:player_client=tv_embedded,mediaconnect',
+];
 
 /** Map<guildId, GuildQueue> */
 const queues = new Map();
 
+// ── GuildQueue ────────────────────────────────────────────────
+
 class GuildQueue {
   constructor() {
-    this.songs   = [];    // [{ title, url, requestedBy }]
-    this.player  = createAudioPlayer();
-    this.connection = null;
-    this.volume  = 1.0;
-    this.current = null;
-    this.textChannel = null;
-    this._currentProcess = null; // track spawned yt-dlp process
+    this.songs          = [];   // [{ title, url, requestedBy }]
+    this.player         = createAudioPlayer();
+    this.connection     = null;
+    this.volume         = 1.0;
+    this.current        = null;
+    this.textChannel    = null;
+    this._currentProc   = null; // active yt-dlp child process
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────
+// ── Stream creation ───────────────────────────────────────────
 
 /**
- * Spawn yt-dlp → pipe its best-audio stream → return a Node.js Readable
- * that @discordjs/voice can consume directly via FFmpeg.
+ * Spawns yt-dlp piped to stdout and returns a Promise that:
+ *   • resolves with { stream, proc } once the first data chunk arrives
+ *     (confirming yt-dlp is actually sending audio)
+ *   • rejects with a descriptive Error if yt-dlp exits non-zero before
+ *     any data, so callers can skip cleanly instead of getting silence.
  */
 function createYtDlpStream(url) {
-  // yt-dlp writes the raw audio to stdout; FFmpeg re-encodes to PCM/Opus
-  const proc = spawn(YT_DLP, [
-    '--no-playlist',
-    '-f', 'bestaudio[ext=webm]/bestaudio/best',
-    '--no-cache-dir',
-    '-o', '-',   // pipe to stdout
-    url,
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  return new Promise((resolve, reject) => {
+    const proc = spawn(YT_DLP, [
+      '--no-playlist',
+      ...YT_CLIENT_ARGS,
+      // Prefer m4a (AAC) — what tv_embedded/mediaconnect actually serve;
+      // fall back to any best audio if needed.
+      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+      '--no-cache-dir',
+      '--no-warnings',
+      '-o', '-',           // pipe raw audio to stdout
+      url,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  proc.stderr.on('data', (d) => {
-    const msg = d.toString();
-    // Only log actual errors, not yt-dlp progress lines
-    if (msg.includes('ERROR') || msg.includes('error')) {
-      console.error('[yt-dlp]', msg.trim());
-    }
+    let errBuf   = '';
+    let resolved = false;
+
+    proc.stderr.on('data', (chunk) => {
+      errBuf += chunk.toString();
+      // Surface real errors immediately
+      const line = chunk.toString().trim();
+      if (line.includes('ERROR')) console.error('[yt-dlp]', line);
+    });
+
+    // First stdout data → stream is live, hand it off
+    proc.stdout.once('data', () => {
+      resolved = true;
+      resolve({ stream: proc.stdout, proc });
+    });
+
+    // Process closed before any data arrived → reject with yt-dlp's message
+    proc.once('close', (code) => {
+      if (!resolved && code !== 0) {
+        const msg = errBuf.trim() || `yt-dlp exited with code ${code}`;
+        reject(new Error(msg));
+      }
+    });
+
+    proc.once('error', (err) => {
+      if (!resolved) reject(err);
+    });
   });
+}
 
-  return { stream: proc.stdout, proc };
+// ── Internal playback ─────────────────────────────────────────
+
+async function _playNext(guildId) {
+  const q = queues.get(guildId);
+  if (!q) return;
+
+  if (q.songs.length === 0) {
+    // Auto-disconnect after 30 s of silence
+    setTimeout(() => destroyQueue(guildId), 30_000);
+    return;
+  }
+
+  q.current = q.songs.shift();
+
+  try {
+    const { stream, proc } = await createYtDlpStream(q.current.url);
+    q._currentProc = proc;
+
+    // @discordjs/voice pipes StreamType.Arbitrary through its internal FFmpeg
+    // → Opus encoder automatically, so we don't need to run FFmpeg ourselves.
+    const resource = createAudioResource(stream, {
+      inputType:    StreamType.Arbitrary,
+      inlineVolume: true,
+    });
+    resource.volume?.setVolume(q.volume);
+
+    q.player.play(resource);
+
+    // When this track finishes, advance the queue
+    q.player.once(AudioPlayerStatus.Idle, () => {
+      try { proc.kill('SIGKILL'); } catch {}
+      _playNext(guildId);
+    });
+
+    console.log(`[Music] ▶ Now playing: ${q.current.title}`);
+
+    // Announce in text channel if available
+    q.textChannel?.send(`▶️ **Now playing:** ${q.current.title}`).catch(() => {});
+
+  } catch (err) {
+    console.error(`[Music] Failed to stream "${q.current?.title}":`, err.message);
+    q.textChannel?.send(
+      `⚠️ Could not play **${q.current?.title}** — skipping.\n\`${err.message.slice(0, 200)}\``
+    ).catch(() => {});
+    _playNext(guildId);
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────
@@ -72,27 +157,28 @@ function getQueue(guildId) {
 function destroyQueue(guildId) {
   const q = queues.get(guildId);
   if (!q) return;
-  try { q._currentProcess?.kill('SIGKILL'); } catch {}
+  try { q._currentProc?.kill('SIGKILL'); } catch {}
   q.player.stop(true);
   try { q.connection?.destroy(); } catch {}
   queues.delete(guildId);
 }
 
 /**
- * Join voice and enqueue a song. Starts playback immediately if idle.
+ * Join voice and enqueue a song.  Starts playback immediately if idle.
  */
-async function play_(guildId, voiceChannel, textChannel, song) {
+async function play(guildId, voiceChannel, textChannel, song) {
   const q = getQueue(guildId);
   q.textChannel = textChannel;
   q.songs.push(song);
 
   if (!q.connection) {
     q.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
+      channelId:      voiceChannel.id,
       guildId,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     });
 
+    // Handle unexpected disconnects gracefully
     q.connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
@@ -105,72 +191,24 @@ async function play_(guildId, voiceChannel, textChannel, song) {
     });
 
     q.connection.subscribe(q.player);
-    _playNext(guildId);
-  }
-}
-
-/**
- * Internal: pull the next song off the queue and stream it.
- */
-async function _playNext(guildId) {
-  const q = queues.get(guildId);
-  if (!q) return;
-
-  if (q.songs.length === 0) {
-    setTimeout(() => destroyQueue(guildId), 30_000);
-    return;
-  }
-
-  q.current = q.songs.shift();
-
-  try {
-    const { stream, proc } = createYtDlpStream(q.current.url);
-    q._currentProcess = proc;
-
-    proc.on('error', (err) => {
-      console.error(`[Music] yt-dlp process error for "${q.current?.title}":`, err.message);
-    });
-
-    // @discordjs/voice accepts any Readable with StreamType.Arbitrary;
-    // it will internally pass it through FFmpeg → Opus encoder.
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Arbitrary,
-      inlineVolume: true,
-    });
-    resource.volume?.setVolume(q.volume);
-
-    q.player.play(resource);
-    q.player.once(AudioPlayerStatus.Idle, () => {
-      try { proc.kill('SIGKILL'); } catch {}
-      _playNext(guildId);
-    });
-
-    console.log(`[Music] ▶ Now playing: ${q.current.title}`);
-  } catch (err) {
-    console.error(`[Music] Failed to start "${q.current?.title}":`, err.message);
-    q.textChannel?.send(`⚠️ Could not play **${q.current?.title}** — skipping.`).catch(() => {});
-    _playNext(guildId);
+    await _playNext(guildId);
   }
 }
 
 function skip(guildId) {
   const q = queues.get(guildId);
   if (!q) return false;
-  try { q._currentProcess?.kill('SIGKILL'); } catch {}
+  try { q._currentProc?.kill('SIGKILL'); } catch {}
   q.player.stop();
   return true;
 }
 
 function pause(guildId) {
-  const q = queues.get(guildId);
-  if (!q) return false;
-  return q.player.pause();
+  return queues.get(guildId)?.player.pause() ?? false;
 }
 
 function resume(guildId) {
-  const q = queues.get(guildId);
-  if (!q) return false;
-  return q.player.unpause();
+  return queues.get(guildId)?.player.unpause() ?? false;
 }
 
 function setVolume(guildId, percent) {
@@ -182,10 +220,20 @@ function setVolume(guildId, percent) {
   return true;
 }
 
-function getCurrent(guildId)   { return queues.get(guildId)?.current ?? null; }
-function getQueueList(guildId) { return queues.get(guildId)?.songs   ?? []; }
+function getCurrent(guildId)   { return queues.get(guildId)?.current  ?? null; }
+function getQueueList(guildId) { return queues.get(guildId)?.songs     ?? []; }
 function isPaused(guildId) {
   return queues.get(guildId)?.player.state.status === AudioPlayerStatus.Paused;
 }
 
-module.exports = { play: play_, skip, pause, resume, setVolume, getCurrent, getQueueList, isPaused, destroyQueue };
+module.exports = {
+  play,
+  skip,
+  pause,
+  resume,
+  setVolume,
+  getCurrent,
+  getQueueList,
+  isPaused,
+  destroyQueue,
+};
