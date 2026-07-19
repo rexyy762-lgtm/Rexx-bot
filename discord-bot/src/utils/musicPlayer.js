@@ -1,10 +1,21 @@
 // ============================================================
 // utils/musicPlayer.js — Per-guild music queue & voice management
 //
-// YouTube bypass strategy (tested July 2026):
-//   --extractor-args "youtube:player_client=tv_embedded,mediaconnect"
-//   Both clients return signed audio/mp4 stream URLs without cookies or
-//   PO tokens.  (ios/mweb/web_creator all fail on Replit IPs.)
+// Two-stage audio pipeline (solves YouTube bot-detection):
+//
+//   Stage 1 – yt-dlp --get-url
+//     yt-dlp resolves the signed googlevideo.com CDN URL using the
+//     tv_embedded / mediaconnect client.  It only makes a lightweight
+//     API call — it never downloads audio bytes, so YouTube's download
+//     bot-detector never fires.
+//
+//   Stage 2 – FFmpeg HTTP → PCM pipe
+//     FFmpeg fetches the CDN URL directly (looks like a normal browser
+//     request), transcodes to raw s16le PCM at 48 kHz / stereo, and
+//     pipes the bytes to @discordjs/voice, which Opus-encodes them for
+//     Discord.  FFmpeg's reconnect flags handle transient CDN errors.
+//
+// Tested July 2026 on Replit GCP IPs.
 // ============================================================
 'use strict';
 
@@ -22,91 +33,130 @@ const path = require('path');
 
 // ── Paths ─────────────────────────────────────────────────────
 const YT_DLP = path.join(__dirname, '../../bin/yt-dlp');
-const FFMPEG  = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFMPEG  = process.env.FFMPEG_PATH ?? 'ffmpeg';
 
-// Shared yt-dlp flags that bypass YouTube bot detection on server IPs
+// Player clients that work without PO tokens or cookies on GCP IPs
 const YT_CLIENT_ARGS = [
   '--extractor-args', 'youtube:player_client=tv_embedded,mediaconnect',
 ];
 
-/** Map<guildId, GuildQueue> */
+/** @type {Map<string, GuildQueue>} */
 const queues = new Map();
 
 // ── GuildQueue ────────────────────────────────────────────────
 
 class GuildQueue {
   constructor() {
-    this.songs          = [];   // [{ title, url, requestedBy }]
-    this.player         = createAudioPlayer();
-    this.connection     = null;
-    this.volume         = 1.0;
-    this.current        = null;
-    this.textChannel    = null;
-    this._currentProc   = null; // active yt-dlp child process
+    this.songs        = [];    // Array<{ title, url, requestedBy }>
+    this.player       = createAudioPlayer();
+    this.connection   = null;
+    this.volume       = 1.0;
+    this.current      = null;
+    this.textChannel  = null;
+    this._proc        = null;  // active FFmpeg child process
   }
 }
 
-// ── Stream creation ───────────────────────────────────────────
+// ── Stage 1: URL resolution ───────────────────────────────────
 
 /**
- * Spawns yt-dlp piped to stdout and returns a Promise that:
- *   • resolves with { stream, proc } once the first data chunk arrives
- *     (confirming yt-dlp is actually sending audio)
- *   • rejects with a descriptive Error if yt-dlp exits non-zero before
- *     any data, so callers can skip cleanly instead of getting silence.
+ * Asks yt-dlp to resolve the signed googlevideo CDN URL for a video.
+ * Only makes lightweight YouTube API calls — never downloads audio bytes.
+ *
+ * @param {string} videoUrl  YouTube watch / shorts URL
+ * @returns {Promise<string>} Direct CDN URL ready for FFmpeg
  */
-function createYtDlpStream(url) {
+function resolveCdnUrl(videoUrl) {
   return new Promise((resolve, reject) => {
     const proc = spawn(YT_DLP, [
       '--no-playlist',
       ...YT_CLIENT_ARGS,
-      // Prefer m4a (AAC) — what tv_embedded/mediaconnect actually serve;
-      // fall back to any best audio if needed.
-      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
-      '--no-cache-dir',
+      '-f', 'bestaudio[ext=m4a]/bestaudio/best',
       '--no-warnings',
-      '-o', '-',           // pipe raw audio to stdout
-      url,
+      '--get-url',          // print CDN URL(s), do NOT download
+      videoUrl,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    let errBuf   = '';
-    let resolved = false;
+    let stdout = '';
+    let stderr = '';
 
-    proc.stderr.on('data', (chunk) => {
-      errBuf += chunk.toString();
-      // Surface real errors immediately
-      const line = chunk.toString().trim();
-      if (line.includes('ERROR')) console.error('[yt-dlp]', line);
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+      const line = d.toString().trim();
+      if (line.startsWith('ERROR')) console.error('[yt-dlp]', line);
     });
 
-    // First stdout data → stream is live, hand it off
-    proc.stdout.once('data', () => {
-      resolved = true;
-      resolve({ stream: proc.stdout, proc });
-    });
-
-    // Process closed before any data arrived → reject with yt-dlp's message
-    proc.once('close', (code) => {
-      if (!resolved && code !== 0) {
-        const msg = errBuf.trim() || `yt-dlp exited with code ${code}`;
-        reject(new Error(msg));
+    proc.on('close', (code) => {
+      // --get-url may return multiple lines (one per format); take the first
+      const url = stdout.trim().split('\n')[0]?.trim();
+      if (code !== 0 || !url) {
+        return reject(new Error(
+          stderr.trim().replace(/\n/g, ' ').slice(0, 300) ||
+          `yt-dlp exited with code ${code}`
+        ));
       }
+      resolve(url);
     });
 
-    proc.once('error', (err) => {
-      if (!resolved) reject(err);
-    });
+    proc.on('error', (err) =>
+      reject(new Error(`yt-dlp spawn failed: ${err.message}`))
+    );
   });
 }
 
-// ── Internal playback ─────────────────────────────────────────
+// ── Stage 2: FFmpeg stream ────────────────────────────────────
+
+/**
+ * Spawns FFmpeg to download the signed CDN URL and transcode it to
+ * raw signed-16-bit little-endian PCM at 48 kHz stereo (StreamType.Raw).
+ *
+ * @param {string} cdnUrl  Signed googlevideo.com URL from Stage 1
+ * @returns {{ proc: ChildProcess, stream: Readable }}
+ */
+function spawnFfmpeg(cdnUrl) {
+  const proc = spawn(FFMPEG, [
+    // HTTP reconnect — handles CDN hiccups without stopping playback
+    '-reconnect',            '1',
+    '-reconnect_streamed',   '1',
+    '-reconnect_delay_max',  '5',
+    // Input: the signed CDN URL
+    '-i', cdnUrl,
+    // Output: raw PCM that @discordjs/voice (StreamType.Raw) expects
+    '-vn',                    // strip video
+    '-f',    's16le',         // signed 16-bit little-endian
+    '-ar',   '48000',         // 48 kHz — Discord's native sample rate
+    '-ac',   '2',             // stereo
+    'pipe:1',                 // write to stdout
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  proc.stderr.on('data', (d) => {
+    const msg = d.toString();
+    // FFmpeg sends progress to stderr; only surface real errors
+    if (
+      (msg.includes('Error') || msg.includes('Invalid')) &&
+      !msg.includes('past duration') &&
+      !msg.includes('non monotonous')
+    ) {
+      console.error('[FFmpeg]', msg.trim().slice(0, 200));
+    }
+  });
+
+  proc.on('error', (err) => {
+    console.error('[FFmpeg] Spawn error:', err.message);
+  });
+
+  return { proc, stream: proc.stdout };
+}
+
+// ── Internal: advance the queue ───────────────────────────────
 
 async function _playNext(guildId) {
   const q = queues.get(guildId);
   if (!q) return;
 
   if (q.songs.length === 0) {
-    // Auto-disconnect after 30 s of silence
+    // Leave voice after 30 s of silence
     setTimeout(() => destroyQueue(guildId), 30_000);
     return;
   }
@@ -114,35 +164,39 @@ async function _playNext(guildId) {
   q.current = q.songs.shift();
 
   try {
-    const { stream, proc } = await createYtDlpStream(q.current.url);
-    q._currentProc = proc;
+    // Stage 1 — resolve the CDN URL (fast, ~0.5–1 s)
+    const cdnUrl = await resolveCdnUrl(q.current.url);
 
-    // @discordjs/voice pipes StreamType.Arbitrary through its internal FFmpeg
-    // → Opus encoder automatically, so we don't need to run FFmpeg ourselves.
+    // Stage 2 — stream via FFmpeg
+    const { proc, stream } = spawnFfmpeg(cdnUrl);
+    q._proc = proc;
+
+    // StreamType.Raw = s16le PCM @ 48000/2ch — @discordjs/voice Opus-encodes it
     const resource = createAudioResource(stream, {
-      inputType:    StreamType.Arbitrary,
+      inputType:    StreamType.Raw,
       inlineVolume: true,
     });
     resource.volume?.setVolume(q.volume);
 
     q.player.play(resource);
 
-    // When this track finishes, advance the queue
+    // When the current track ends, advance
     q.player.once(AudioPlayerStatus.Idle, () => {
       try { proc.kill('SIGKILL'); } catch {}
       _playNext(guildId);
     });
 
     console.log(`[Music] ▶ Now playing: ${q.current.title}`);
-
-    // Announce in text channel if available
-    q.textChannel?.send(`▶️ **Now playing:** ${q.current.title}`).catch(() => {});
+    q.textChannel
+      ?.send(`▶️ **Now playing:** ${q.current.title}`)
+      .catch(() => {});
 
   } catch (err) {
-    console.error(`[Music] Failed to stream "${q.current?.title}":`, err.message);
-    q.textChannel?.send(
-      `⚠️ Could not play **${q.current?.title}** — skipping.\n\`${err.message.slice(0, 200)}\``
-    ).catch(() => {});
+    console.error(`[Music] Failed to play "${q.current?.title}":`, err.message);
+    q.textChannel
+      ?.send(`⚠️ Could not play **${q.current?.title}** — skipping.\n\`${err.message.slice(0, 200)}\``)
+      .catch(() => {});
+    // Skip to the next song
     _playNext(guildId);
   }
 }
@@ -157,7 +211,7 @@ function getQueue(guildId) {
 function destroyQueue(guildId) {
   const q = queues.get(guildId);
   if (!q) return;
-  try { q._currentProc?.kill('SIGKILL'); } catch {}
+  try { q._proc?.kill('SIGKILL'); } catch {}
   q.player.stop(true);
   try { q.connection?.destroy(); } catch {}
   queues.delete(guildId);
@@ -165,6 +219,11 @@ function destroyQueue(guildId) {
 
 /**
  * Join voice and enqueue a song.  Starts playback immediately if idle.
+ *
+ * @param {string}                         guildId
+ * @param {import('discord.js').VoiceChannel} voiceChannel
+ * @param {import('discord.js').TextChannel}  textChannel
+ * @param {{ title: string, url: string, requestedBy: string }} song
  */
 async function play(guildId, voiceChannel, textChannel, song) {
   const q = getQueue(guildId);
@@ -178,7 +237,7 @@ async function play(guildId, voiceChannel, textChannel, song) {
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     });
 
-    // Handle unexpected disconnects gracefully
+    // Reconnect gracefully on unexpected disconnect
     q.connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
@@ -198,18 +257,13 @@ async function play(guildId, voiceChannel, textChannel, song) {
 function skip(guildId) {
   const q = queues.get(guildId);
   if (!q) return false;
-  try { q._currentProc?.kill('SIGKILL'); } catch {}
+  try { q._proc?.kill('SIGKILL'); } catch {}
   q.player.stop();
   return true;
 }
 
-function pause(guildId) {
-  return queues.get(guildId)?.player.pause() ?? false;
-}
-
-function resume(guildId) {
-  return queues.get(guildId)?.player.unpause() ?? false;
-}
+function pause(guildId)  { return queues.get(guildId)?.player.pause()   ?? false; }
+function resume(guildId) { return queues.get(guildId)?.player.unpause() ?? false; }
 
 function setVolume(guildId, percent) {
   const q = queues.get(guildId);
@@ -220,8 +274,8 @@ function setVolume(guildId, percent) {
   return true;
 }
 
-function getCurrent(guildId)   { return queues.get(guildId)?.current  ?? null; }
-function getQueueList(guildId) { return queues.get(guildId)?.songs     ?? []; }
+function getCurrent(guildId)   { return queues.get(guildId)?.current ?? null; }
+function getQueueList(guildId) { return queues.get(guildId)?.songs   ?? []; }
 function isPaused(guildId) {
   return queues.get(guildId)?.player.state.status === AudioPlayerStatus.Paused;
 }
