@@ -12,10 +12,12 @@
     "@discordjs/rest": "^2.4.3",
     "@discordjs/voice": "^0.19.2",
     "@distube/ytdl-core": "^4.16.12",
-    "better-sqlite3": "^12.11.1",
     "discord-api-types": "^0.37.119",
     "discord.js": "^14.16.2",
+    "dotenv": "^17.4.2",
     "libsodium-wrappers": "^0.7.15",
+    "lowdb": "^7.0.1",
+    "mongoose": "^9.9.1",
     "openai": "^4.96.2",
     "opusscript": "^0.1.1",
     "youtube-sr": "^4.3.12"

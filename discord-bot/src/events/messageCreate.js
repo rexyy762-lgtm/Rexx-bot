@@ -6,7 +6,7 @@
 const { addXP, xpForLevel } = require('../utils/database');
 const { colors, xpMin, xpMax, xpCooldown } = require('../config');
 const { EmbedBuilder } = require('discord.js');
-const { checkMessage } = require('../automod/index');
+
 
 /** Map<guildId-userId, lastMessageTimestamp> for XP cooldowns. */
 const cooldowns = new Map();

@@ -7,6 +7,7 @@
 // ============================================================
 
 // discord.js re-exports both REST and Routes so we don't need @discordjs/rest directly
+require('dotenv').config();
 const { REST, Routes } = require('discord.js');
 const fs = require('fs');
 const path = require('path');

@@ -6,7 +6,7 @@
 const { EmbedBuilder } = require('discord.js');
 const { getGuildConfig } = require('../utils/database');
 const { colors } = require('../config');
-const { checkRaid } = require('../automod/index');
+
 
 module.exports = {
   name: 'guildMemberAdd',
