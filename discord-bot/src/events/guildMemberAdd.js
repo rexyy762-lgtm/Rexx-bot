@@ -13,7 +13,7 @@ module.exports = {
 
   async execute(member) {
     // ── Anti-Raid detection ──────────────────────────────────
-    await checkRaid(member);
+    
 
     // ── Welcome message ──────────────────────────────────────
     const config = getGuildConfig(member.guild.id);

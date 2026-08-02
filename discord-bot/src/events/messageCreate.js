@@ -1,6 +1,6 @@
 // ============================================================
 // events/messageCreate.js — Awards XP + runs AutoMod checks
-// ============================================================
+// await checkMessage(message);// ============================================================
 'use strict';
 
 const { addXP, xpForLevel } = require('../utils/database');
@@ -19,8 +19,7 @@ module.exports = {
     if (message.author.bot) return;
     if (!message.guild)     return;
 
-    // ── AutoMod check (runs first, may delete the message) ──
-    await checkMessage(message);
+    // ── AutoMod check (runs first, may delete the message) ─
 
     // ── XP system ───────────────────────────────────────────
     // Note: if the message was deleted by AutoMod it still awards XP
