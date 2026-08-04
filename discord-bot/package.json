@@ -12,6 +12,8 @@
     "@discordjs/rest": "^2.4.3",
     "@discordjs/voice": "^0.19.2",
     "@distube/ytdl-core": "^4.16.12",
+    "@google/genai": "^2.15.0",
+    "axios": "^1.19.0",
     "discord-api-types": "^0.37.119",
     "discord.js": "^14.16.2",
     "dotenv": "^17.4.2",

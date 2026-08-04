@@ -26,9 +26,7 @@ function readJson(filePath, defaultValue = {}) {
 
 /** Write data to a JSON file atomically (write to temp then rename). */
 function writeJson(filePath, data) {
-  const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, filePath);
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
 // ── Leveling ─────────────────────────────────────────────────

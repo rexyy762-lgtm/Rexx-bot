@@ -23,6 +23,8 @@ const client = new Client({
 // ── Attach a commands Collection to the client ───────────────
 client.commands = new Collection();
 
+client.prefixCommands = new Collection();
+
 // ── Load all command files recursively from commands/ ────────
 const commandsPath = path.join(__dirname, 'commands');
 const commandFolders = fs.readdirSync(commandsPath);
@@ -40,6 +42,21 @@ for (const folder of commandFolders) {
     }
     client.commands.set(command.data.name, command);
     console.log(`  ✔ Loaded command: /${command.data.name}`);
+  }
+}
+
+// ── Load prefix commands ─────────────────────────────────────
+const prefixPath = path.join(__dirname, 'prefixCommands');
+
+if (fs.existsSync(prefixPath)) {
+  const prefixFiles = fs.readdirSync(prefixPath).filter(f => f.endsWith('.js'));
+
+  for (const file of prefixFiles) {
+    const command = require(path.join(prefixPath, file));
+
+    client.prefixCommands.set(command.name, command);
+
+    console.log(`  ✔ Loaded prefix command: ${command.name}`);
   }
 }
 
@@ -62,7 +79,6 @@ if (!token) {
   console.error('❌ DISCORD_TOKEN is not set. Add it to your Replit Secrets.');
   process.exit(1);
 }
-
 // ── Log in ───────────────────────────────────────────────────
 client.login(token).catch(err => {
   console.error('❌ Failed to log in:', err.message);

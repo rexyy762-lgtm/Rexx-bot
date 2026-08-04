@@ -19,6 +19,46 @@ module.exports = {
     if (message.author.bot) return;
     if (!message.guild)     return;
 
+// ── Prefix to Slash command bridge ──────────────────────────
+const prefix = "n!";
+
+if (message.content.startsWith(prefix)) {
+  const args = message.content
+    .slice(prefix.length)
+    .trim()
+    .split(/ +/);
+
+  const commandName = args.shift().toLowerCase();
+
+  const command = message.client.commands.get(commandName);
+
+  if (command) {
+    try {
+      const fakeInteraction = {
+        ...message,
+        isChatInputCommand: () => true,
+        commandName,
+        options: {
+          getString: (name) => args.join(" "),
+          getUser: () => message.mentions.users.first(),
+          getMember: () => message.mentions.members.first(),
+        },
+        reply: (content) => message.reply(content),
+        deferReply: async () => {},
+        editReply: (content) => message.reply(content),
+        followUp: (content) => message.reply(content),
+        user: message.author,
+      };
+
+      await command.execute(fakeInteraction);
+
+    } catch (error) {
+      console.error("Prefix Bridge Error:", error);
+      message.reply("❌ Command error.");
+    }
+  }
+}
+
     // ── AutoMod check (runs first, may delete the message) ─
 
     // ── XP system ───────────────────────────────────────────

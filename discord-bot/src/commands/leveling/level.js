@@ -12,6 +12,7 @@ module.exports = {
     .setDescription('⭐ Show your current level and XP progress'),
 
   async execute(interaction) {
+await interaction.deferReply();
     const { xp, level, messages } = getUserXP(interaction.guild.id, interaction.user.id);
 
     const currentLevelXP = Math.floor(xpForLevel(level));
@@ -40,6 +41,6 @@ module.exports = {
       footer: { text: `Server: ${interaction.guild.name}` },
     });
 
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] });
   },
 };

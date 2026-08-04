@@ -19,6 +19,7 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
 
   async execute(interaction) {
+await interaction.deferReply();
     if (!(await requirePermissions(interaction, PermissionFlagsBits.KickMembers))) return;
     if (!(await requireBotPermissions(interaction, PermissionFlagsBits.KickMembers))) return;
 
@@ -26,7 +27,7 @@ module.exports = {
     const reason = interaction.options.getString('reason') ?? 'No reason provided';
 
     if (target.id === interaction.user.id)
-      return interaction.reply({ embeds: [errorEmbed('You cannot kick yourself.')], ephemeral: true });
+      return interaction.editreply({ embeds: [errorEmbed('You cannot kick yourself.')], ephemeral: true });
 
     const member = interaction.guild?.members.cache.get(target.id);
     if (!member)

@@ -35,6 +35,8 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
 
   async execute(interaction) {
+      await interaction.deferReply();
+
     if (!(await requirePermissions(interaction, PermissionFlagsBits.ManageChannels))) return;
     if (!(await requireBotPermissions(interaction, PermissionFlagsBits.ManageChannels))) return;
 
@@ -66,11 +68,11 @@ module.exports = {
           ? `🔒 Successfully locked **${updated}** channel(s).`
           : `🔓 Successfully unlocked **${updated}** channel(s).`;
 
-      return interaction.reply({
+      return interaction.editreply({
         embeds: [successEmbed(message, title)],
       });
     } catch (err) {
-      return interaction.reply({
+      return interaction.editreply({
         embeds: [
           errorEmbed(`Failed to update server channels:\n${err.message}`),
         ],
