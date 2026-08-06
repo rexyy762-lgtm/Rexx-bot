@@ -1,40 +1,86 @@
 // ============================================================
-// commands/utility/ticket.js — Nova Ticket Panel
+// commands/utility/ticket.js — Nova Premium Ticket Panel
 // ============================================================
 
 const {
   SlashCommandBuilder,
   EmbedBuilder,
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle
+  StringSelectMenuBuilder,
 } = require("discord.js");
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("ticket")
-    .setDescription("Open the support ticket panel"),
+    .setDescription("Open Nova's support panel"),
 
   async execute(interaction) {
 
     const embed = new EmbedBuilder()
-      .setTitle("🎫 Support Ticket")
+      .setColor("#5865F2")
+      .setTitle("🎫 Nova Support Center")
       .setDescription(
-        "Need help?\nClick the button below to create a ticket."
+        [
+          "> Welcome to **Nova Support**!",
+          "",
+          "Please select the category that best matches your issue.",
+          "",
+          "🛠️ General Support",
+          "🐞 Bug Report",
+          "🤝 Partnership",
+          "💡 Suggestion",
+          "🚨 User Report",
+          "",
+          "**Our staff will assist you as soon as possible.**"
+        ].join("\n")
       )
-      .setColor("Blue");
+      .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
+      .setFooter({
+        text: `Powered by Nova • ${interaction.guild.name}`
+      })
+      .setTimestamp();
 
-    const row = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId("create_ticket")
-          .setLabel("🎫 Create Ticket")
-          .setStyle(ButtonStyle.Primary)
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("ticket_category")
+      .setPlaceholder("📂 Select a ticket category...")
+      .addOptions(
+        {
+          label: "General Support",
+          description: "Get help from our staff",
+          value: "support",
+          emoji: "🛠️",
+        },
+        {
+          label: "Bug Report",
+          description: "Report a bug",
+          value: "bug",
+          emoji: "🐞",
+        },
+        {
+          label: "Partnership",
+          description: "Request a partnership",
+          value: "partner",
+          emoji: "🤝",
+        },
+        {
+          label: "Suggestion",
+          description: "Send us your ideas",
+          value: "suggestion",
+          emoji: "💡",
+        },
+        {
+          label: "User Report",
+          description: "Report a member",
+          value: "report",
+          emoji: "🚨",
+        }
       );
+
+    const row = new ActionRowBuilder().addComponents(menu);
 
     await interaction.reply({
       embeds: [embed],
-      components: [row]
+      components: [row],
     });
-  }
+  },
 };

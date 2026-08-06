@@ -16,7 +16,7 @@ const sections = [
   },
   {
     name: '🔧 Utility',
-    value: '`/role` `/welcome` `/goodbye` `/ticket` `/suggest`',
+    value: '`/role` `/welcome` `/goodbye` `/ticket` `/suggest` `/emojis`',
   },
   {
     name: '⭐ Leveling',
